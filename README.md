@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-pytest-orange?style=flat-square)](#)
 
-> Small, production-minded terminal tool that downloads adjusted market prices and prints a compact, human-friendly RISK REPORT for a given ticker.
+> Production-minded terminal tool that downloads adjusted market prices and prints a compact, human-friendly risk report for a given ticker.
 
 <p align="center">
 	<img src="docs/screenshot.svg" alt="riskcli interactive" width="640"/>
@@ -102,7 +102,6 @@ The CLI uses `yfinance` and may encounter remote rate-limits. To reduce failures
 - A small in-memory cache (300s TTL) per `(ticker, period, interval)` during interactive sessions.
 - A 3-attempt exponential backoff with jitter for transient failures.
 
-If you need stronger guarantees we can add an on-disk cache (pickle/sqlite) and a longer retry budget.
 
 Export
 ------
@@ -125,28 +124,39 @@ Development notes
 - Keep `yfinance` network calls isolated for easier testing.
 - Add tests for numeric formatting and metric edge-cases.
 
-Contributing
-------------
-Contributions welcome — open an issue or PR. Please include tests for new behaviors and keep changes focused.
 
-License
--------
-MIT — see `LICENSE`.
 
-Contact
--------
-If you'd like a CI pipeline, PyPI packaging, or a docs site, I can add GitHub Actions workflows and packaging metadata.
+## Contributing
 
----
+Here's how to get started:
 
-Contributing
-------------
-Contributions welcome. Open issues for bugs or feature requests. If you submit code, please include tests and keep changes small and focused.
+1. **Fork the repository**
+2. **Create a feature branch**: `git checkout -b feature/amazing-feature`
+3. **Make changes and test thoroughly**
+4. **Commit with clear messages**: `git commit -m 'Add amazing feature'`
+5. **Push to branch**: `git push origin feature/amazing-feature`
+6. **Create Pull Request**
 
 License
 -------
 This project is licensed under the MIT License (see `LICENSE`).
 
-Contact
+## 👤 Author
+
+**Your Name**
+- GitHub: [@designed7000](https://github.com/designed7000)
+- LinkedIn: [Alex_Chortis](https://www.linkedin.com/in/alexandros-c-225804103/)
+- Email: alexander.tux@gmail.com
+
+
+
+<div align="center">
+
+[Deploy Now](aws-deployment/) 
+
+</div>
+
+
+License
 -------
-If you want help adding CI, packaging to PyPI, or additional metrics (rolling windows, EWMA volatility, more export options), say which feature and I will implement it.
+MIT — see `LICENSE`.
