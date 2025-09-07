@@ -1,22 +1,5 @@
 # riskcli — Risk Evaluation CLI
 
-`riskcli` is a small terminal program that downloads price data and prints a compact, human-friendly risk report for a given ticker.
-
-This README shows quick setup, how to run interactively or non-interactively, examples (including compare mode), and troubleshooting tips.
-
-Quick setup
-# riskcli — Risk Evaluation CLI
-
-riskcli is a small, fast terminal utility that downloads historical market prices and prints a compact, human-friendly risk report for a given ticker.
-
-This repository contains a lightweight Python package with:
-- A CLI entrypoint (`python -m riskcli`) supporting non-interactive and interactive modes
-- Risk and performance metrics (Sharpe, Sortino, Beta, Alpha, Max Drawdown, VaR/CVaR, etc.)
-- Compare mode to show two windows (side-by-side on wide terminals)
-- Export to JSON/CSV and a small unit test suite
----
-# riskcli — Risk Evaluation CLI
-
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-pytest-orange?style=flat-square)](#)
