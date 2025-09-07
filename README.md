@@ -137,9 +137,7 @@ Here's how to get started:
 5. **Push to branch**: `git push origin feature/amazing-feature`
 6. **Create Pull Request**
 
-License
--------
-This project is licensed under the MIT License (see `LICENSE`).
+
 
 ## 👤 Author
 
@@ -150,13 +148,6 @@ This project is licensed under the MIT License (see `LICENSE`).
 
 
 
-<div align="center">
-
-[Deploy Now](aws-deployment/) 
-
-</div>
-
-
 License
 -------
-MIT — see `LICENSE`.
+This project is licensed under the MIT License (see `LICENSE`).
