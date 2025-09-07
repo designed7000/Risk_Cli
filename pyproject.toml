@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=42","wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "riskcli"
+version = "0.0.0"
+description = "Small CLI that fetches market data and prints a compact risk report"
+authors = [ { name = "Auto Generated" } ]
+requires-python = ">=3.9"
+dependencies = [
+    "yfinance",
+    "pandas",
+    "numpy",
+    "rich",
+    "tabulate",
+    "python-dateutil",
+]
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "-q"

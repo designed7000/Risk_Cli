@@ -1,0 +1,7 @@
+yfinance
+pandas
+numpy
+rich
+tabulate
+python-dateutil
+pytest
