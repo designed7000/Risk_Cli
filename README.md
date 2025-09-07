@@ -14,16 +14,46 @@ This repository contains a lightweight Python package with:
 - Risk and performance metrics (Sharpe, Sortino, Beta, Alpha, Max Drawdown, VaR/CVaR, etc.)
 - Compare mode to show two windows (side-by-side on wide terminals)
 - Export to JSON/CSV and a small unit test suite
+---
+# riskcli — Risk Evaluation CLI
 
-Short highlights
-----------------
-- Uses yfinance for data retrieval
-- Renders reports with Rich for a readable terminal experience
-- Minimal dependencies and test-driven implementation
+[![Python](https://img.shields.io/badge/Python-3.11%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
+[![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
+[![Tests](https://img.shields.io/badge/tests-pytest-orange?style=flat-square)](#)
+
+> Small, production-minded terminal tool that downloads adjusted market prices and prints a compact, human-friendly RISK REPORT for a given ticker.
+
+<p align="center">
+	<img src="docs/screenshot.svg" alt="riskcli interactive" width="640"/>
+</p>
+
+Summary
+-------
+
+riskcli is a lightweight Python CLI that fetches historical price series (via `yfinance`), computes standard risk and performance metrics, and renders a readable terminal report with `rich`.
+
+Key features
+------------
+- Clean terminal reports (summary panel + metrics table + simple risk grade)
+- Core metrics: annual return, annual vol, Sharpe, Sortino, Max Drawdown, Calmar, VaR/CVaR, Beta/Alpha/R²
+- Interactive menu with numeric shortcuts and a compare mode (two periods side-by-side)
+- Export metrics to JSON or CSV
+- Small unit test suite (no network calls)
+
+Quick links
+-----------
+- Source: `riskcli/`
+- Tests: `tests/`
+- Docs / screenshot: `docs/screenshot.svg`
+
+Requirements
+------------
+- Python 3.11+
+- See `requirements.txt` for full dependency list (pandas, numpy, yfinance, rich, pytest)
 
 Installation
 ------------
-Create and activate a Python virtual environment, then install dependencies:
+Create a virtual environment and install dependencies:
 
 ```bash
 python -m venv .venv
@@ -37,97 +67,94 @@ Run tests:
 python -m pytest -q
 ```
 
-Quick usage
------------
-Non-interactive example:
+Usage
+-----
+Non-interactive (quick report):
 
 ```bash
 python -m riskcli AAPL --period 1y --interval 1d --benchmark ^GSPC --rf 0.02
 ```
 
-Interactive (menu):
+Interactive menu:
 
 ```bash
 python -m riskcli
-# follow interactive prompts; use numeric shortcuts 1..9
 ```
 
 Interactive menu details
 ------------------------
-When you run `python -m riskcli` without a ticker the program opens an interactive panel. The current state appears inside a boxed "Risk Evaluation" panel. Shortcuts are numeric and shown on separate lines for clarity.
+When started without a ticker the CLI opens a boxed interactive panel showing the current state (ticker, period, interval, rf, compare, etc.). Shortcuts are numeric and shown on separate lines for clarity.
 
 Default numeric shortcuts (interactive menu):
 
-- [1] ticker — set the ticker symbol (e.g. AAPL)
+- [1] ticker — set the ticker (e.g. AAPL)
 - [2] period — set the yfinance period (e.g. 1y)
 - [3] interval — set data interval (e.g. 1d)
-- [4] benchmark — set benchmark ticker for beta (default ^GSPC)
-- [5] rf — set annual risk-free rate (accepts 0.02, 2% or 2 -> normalized to 0.02)
-- [6] export — set an export path (.json or .csv)
+- [4] benchmark — set benchmark ticker for beta (default `^GSPC`)
+- [5] rf — set annual risk-free rate (accepts `0.02`, `2%`, or `2` → normalized to `0.02`)
+- [6] export — set an export path (`.json` or `.csv`)
 - [7] compare — toggle compare mode on/off
-- [8] compare_period — set the second period used in compare mode (e.g. 3y)
+- [8] compare_period — set the second period used in compare mode (e.g. `3y`)
 - [9] run — fetch data and display the report
 - [0] quit — exit the menu
 
-When you toggle compare ([7]) the state reflects it; set the `compare_period` with [8] before running.
+Compare mode
+------------
+Set `compare` to `True` in the interactive menu or pass `--compare --compare-period 3y` on the CLI to display two period windows side-by-side when the terminal is wide.
 
-Example interactive menu screenshot:
+Risk-free handling & formatting
+--------------------------------
+- `--rf` accepts decimal (0.03), percent strings (3%), or shorthand integers (3 -> 0.03). The CLI normalizes this once and `metrics` converts to a daily rate via:
 
-![Interactive menu screenshot](docs/screenshot.svg)
-
-Compare mode (side-by-side when wide):
-
-```bash
-python -m riskcli SPY --period 1y --compare --compare-period 3y
-```
-
-Options
--------
-- `--period` — yfinance period strings: 1mo,3mo,6mo,1y,2y,5y,10y,ytd,max (default: `1y`)
-- `--interval` — data interval (e.g. `1d`) (default: `1d`)
-- `--benchmark` — benchmark ticker for beta (default: `^GSPC`)
-- `--rf` — annual risk-free rate (accepts `0.02`, `2%`, or `2` → normalized to `0.02`)
-- `--export` — write metrics/context to `.json` or `.csv`
-
-Formatting notes
-----------------
-- Unitless ratios (Sharpe, Sortino, Beta, Calmar) are displayed as plain numbers (e.g., `1.234`)
-- Percent metrics (Annual Return, Vol, Alpha, VaR, CVaR, Max Drawdown) are shown as percentages
-- R² is displayed as a percentage (e.g., `72.35%`)
-
-Network / rate limits
----------------------
-The CLI uses yfinance, which may rate-limit frequent requests. If you see "Too Many Requests" when running interactively, try again later or use fewer fetches. Consider enabling a cache or adding a simple retry/backoff if you expect to run many interactive queries.
-
-Quick retry/backoff approach (example):
-
-1. On a 429/Too Many Requests response, wait a small amount of time (e.g., 1-3 seconds) and retry. Increase wait time with each successive retry (exponential backoff).
-2. Cache recent downloads (per ticker+period+interval) for a short time during an interactive session to avoid repeated calls when testing.
-
-If you want, I can add a simple in-memory cache and a 3-attempt exponential backoff to the fetch path to reduce rate-limit failures during interactive use.
-
-Design decisions / safety
-------------------------
-- Annualization uses 252 trading days.
-- VaR/CVaR use a simple historical estimate and intentionally return `—` for small samples (<100 daily returns) to avoid misleading tail estimates.
-- The CLI accepts flexible RF inputs but converts them once to a daily rate in the metrics code as:
-
-```
+```py
 rf_daily = (1 + rf_annual) ** (1/252) - 1
+```
+
+- Unitless ratios (Sharpe, Sortino, Beta, Calmar) are shown as plain numbers. Percent metrics and R² are shown as percentages.
+
+Network resilience (rate limits)
+-------------------------------
+The CLI uses `yfinance` and may encounter remote rate-limits. To reduce failures the fetch path includes:
+
+- A small in-memory cache (300s TTL) per `(ticker, period, interval)` during interactive sessions.
+- A 3-attempt exponential backoff with jitter for transient failures.
+
+If you need stronger guarantees we can add an on-disk cache (pickle/sqlite) and a longer retry budget.
+
+Export
+------
+Use `--export out.json` or `--export out.csv` to save computed metrics and contextual fields for further analysis.
+
+Project structure
+-----------------
+```
+./
+├── docs/                  # screenshots and small assets
+├── riskcli/               # package source
+├── tests/                 # unit tests (no network)
+├── requirements.txt
+├── README.md
+└── LICENSE
 ```
 
 Development notes
 -----------------
-- Source is under `riskcli/`.
-- Unit tests live in `tests/` and use synthetic data (no network calls).
+- Keep `yfinance` network calls isolated for easier testing.
+- Add tests for numeric formatting and metric edge-cases.
 
-Publishing
-----------
-Before publishing to GitHub:
+Contributing
+------------
+Contributions welcome — open an issue or PR. Please include tests for new behaviors and keep changes focused.
 
-1. Remove any local virtual environments from the repository (this repo now ignores common venv names via `.gitignore`).
-2. Add a short project description and topics on GitHub to make it discoverable.
-3. Optionally add a small CI workflow (GitHub Actions) to run `pytest` on push.
+License
+-------
+MIT — see `LICENSE`.
+
+Contact
+-------
+If you'd like a CI pipeline, PyPI packaging, or a docs site, I can add GitHub Actions workflows and packaging metadata.
+
+---
 
 Contributing
 ------------
