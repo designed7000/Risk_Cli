@@ -309,13 +309,20 @@ def interactive_menu(parsed_args: argparse.Namespace) -> argparse.Namespace:
         for key, name, label in MENU:
             console.print(f"  [{key}] {name} — {label}")
 
-        choice = Prompt.ask(
-            "Choose action (number or name)",
-            choices=[k for k, _, _ in MENU] + [n for _, n, _ in MENU],
+        raw = Prompt.ask(
+            "Choose an action, or just type tickers",
             default="ticker",
-            show_choices=False,
-        )
-        action = actions.get(choice, choice)
+            show_default=False,
+        ).strip()
+
+        # Anything that isn't a menu action is taken as the holdings. Typing
+        # "NVDA" at this prompt is what people actually try first, and being
+        # told to "select one of the available options" teaches them nothing.
+        key = raw.lower()
+        action = actions.get(key) or (key if key in prompts else None)
+        if action is None:
+            state["ticker"] = raw
+            continue
 
         if action == "quit":
             if Confirm.ask("Quit without running?", default=False):
