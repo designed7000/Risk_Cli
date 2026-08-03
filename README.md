@@ -23,6 +23,8 @@ hand-derived expected value.
 - Annual return (CAGR), annual vol, Sharpe, Sortino, max drawdown, Calmar,
   historical VaR/CVaR, skew, excess kurtosis, CAPM beta / Jensen's alpha / R²
 - Annualization inferred from the bar interval, so `1wk` and `1h` are correct
+- **Portfolio mode**: correlation matrix, diversification ratio, and per-position
+  risk attribution (component VaR and % of risk, which are not the weights)
 - Interactive menu with numeric shortcuts and a two-period compare mode
 - JSON / CSV export
 - Test suite runs offline
@@ -59,6 +61,14 @@ pip install -e ".[dev]"
 riskcli AAPL --period 1y --benchmark ^GSPC --rf 0.04
 ```
 
+Give it more than one ticker and it reports the **portfolio** instead:
+
+```bash
+riskcli AAPL MSFT TLT                       # equal weights
+riskcli AAPL=0.4 MSFT=0.4 TLT=0.2 --rf 4%   # explicit weights
+riskcli SPY=1.3 TLT=-0.3                    # shorts are allowed
+```
+
 Without a ticker it opens the interactive menu:
 
 ```bash
@@ -74,7 +84,32 @@ From a checkout without installing, `python -m riskcli AAPL` works the same way.
 | `--benchmark` | `^GSPC` | Used for beta/alpha/R². Optional; skipped if it fails |
 | `--rf` | `0.0` | Annual risk-free. Accepts `0.04`, `4%` or `4` |
 | `--export` | — | `.json` or `.csv` |
-| `--compare` | off | Adds `--compare-period` (default `3y`) side by side |
+| `--compare` | off | Adds `--compare-period` (default `3y`) side by side. Single-name only |
+
+## Portfolio mode
+
+Portfolio risk is not the weighted average of position risk, and two numbers in
+this view exist to make that concrete:
+
+**Diversification ratio** — weighted-average volatility divided by actual
+portfolio volatility. `1.00x` means the holdings move together and you own one
+bet spread across several tickers; higher means the correlations are doing work.
+
+**Risk attribution** — the `% of Risk` column is each position's *contribution*
+to portfolio volatility, which is not its weight. Two consequences that a weight
+column can never show you:
+
+- A concentrated position is superlinear in risk. In a two-asset uncorrelated
+  book, a 90% weight carries **98.8%** of the risk.
+- A hedge contributes **negative** risk. A bond leg in an equity book routinely
+  shows a negative `% of Risk` — it is removing volatility, not adding it. That
+  is the number you want when deciding what to cut.
+
+Contributions use Euler decomposition on the covariance matrix, so they sum
+exactly to portfolio volatility rather than approximately.
+
+Exports: `.json` carries the full structure (positions, correlation matrix,
+portfolio metrics); `.csv` is the position table plus a `PORTFOLIO` total row.
 
 ## Metric conventions
 
@@ -98,7 +133,21 @@ they are worth stating because implementations differ:
   reported from a sample too small to mean anything.
 - **Alpha** is Jensen's alpha: the intercept of excess asset returns regressed
   on excess benchmark returns, then annualized. It is net of `--rf`.
-- **Average value traded** uses unadjusted close × volume.
+- **Average value traded** uses unadjusted close × volume. It is per-instrument,
+  so the portfolio view omits it rather than printing a meaningless zero.
+
+For portfolios specifically:
+
+- **Weights are constant and rebalanced every bar.** A buy-and-hold book drifts
+  away from its starting weights; this does not model that drift.
+- **Weights are normalized to sum to 1**, so `A=2 B=2` and `A=0.5 B=0.5` are the
+  same portfolio. The normalized weights are printed back so nothing is hidden.
+- **Holdings are aligned on the dates they all share.** A short-history holding
+  truncates the whole sample, and the bar count is shown so you can see it.
+- **Component VaR is parametric** (normal, zero drift) so it decomposes
+  additively; the headline VaR stays historical, matching the single-name
+  report. The two disagree when returns are fat-tailed — which is why both are
+  shown rather than one.
 
 The risk grade is a deliberately coarse heuristic over vol, drawdown and tail
 loss — a conversation starter, not a model output.
@@ -122,6 +171,7 @@ network.
 │   ├── cli.py            # argument parsing, interactive menu, export
 │   ├── data.py           # yfinance fetch, cache, retry, metadata
 │   ├── metrics.py        # pure metric functions (no I/O)
+│   ├── portfolio.py      # aggregation, correlation, risk attribution (no I/O)
 │   ├── report.py         # rich rendering and the risk grade
 │   └── utils.py          # number formatting, sparkline
 └── tests/
@@ -131,8 +181,10 @@ Known limits, stated plainly: prices come from `yfinance`, which is a scraped
 and rate-limited source, not an exchange feed. The cache is per-process, so it
 helps repeat runs inside the interactive menu and nothing else. Beta is a
 single-factor OLS estimate on overlapping bars with no correction for stale
-prices, so it is noisy for illiquid names. Single instrument only — there is no
-portfolio aggregation yet.
+prices, so it is noisy for illiquid names. The covariance matrix behind the risk
+attribution is a plain sample estimate over the whole window — it is not
+shrunk, not exponentially weighted, and it assumes the correlations were stable
+across the period, which in a crisis they are not.
 
 ## Contributing
 

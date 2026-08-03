@@ -60,6 +60,66 @@ def test_missing_values_render_as_a_dash():
     assert report.fmt_unit(float("inf")) == "—"
 
 
+def _portfolio(weights, returns_by_ticker=None):
+    import numpy as np
+
+    from riskcli import portfolio
+
+    rng = np.random.RandomState(2)
+    idx = pd.bdate_range("2022-01-03", periods=201)
+    frames = {}
+    for t in weights:
+        rets = (returns_by_ticker or {}).get(t, rng.normal(0.0005, 0.012, 200))
+        prices = pd.Series([100.0] + list(100 * (1 + pd.Series(rets)).cumprod()), index=idx)
+        frames[t] = pd.DataFrame(
+            {"Close": prices, "Adj Close": prices, "Volume": 1_000}, index=idx
+        )
+    return portfolio.compute_portfolio(frames, weights)
+
+
+def _render(renderable) -> str:
+    from rich.console import Console
+
+    console = Console(width=120, record=True)
+    console.print(renderable)
+    return console.export_text()
+
+
+def test_portfolio_panel_renders():
+    p = _portfolio({"AAPL": 0.5, "MSFT": 0.3, "TLT": 0.2})
+    assert report.build_portfolio_panel(p, "1y", "^GSPC") is not None
+
+
+def test_portfolio_panel_omits_the_meaningless_liquidity_row():
+    # Value traded is a per-instrument figure; there is no portfolio number
+    # for it, and printing 0.00 reads as "this portfolio never trades".
+    p = _portfolio({"AAPL": 0.5, "MSFT": 0.5})
+    assert "Value Traded" not in _render(report.build_portfolio_panel(p, "1y", "^GSPC"))
+
+
+def test_single_name_panel_still_shows_liquidity():
+    idx = pd.bdate_range("2022-01-03", periods=30)
+    df = pd.DataFrame({"Close": 10.0, "Adj Close": 10.0, "Volume": 5}, index=idx)
+    panel = report.build_report_panel("T", {}, df, "1y", "^GSPC", _metrics())
+    assert "Value Traded" in _render(panel)
+
+
+def test_portfolio_panel_renders_with_a_short_leg():
+    p = _portfolio({"SPY": 1.3, "TLT": -0.3})
+    assert report.build_portfolio_panel(p, "1y", "^GSPC") is not None
+
+
+def test_portfolio_panel_renders_a_single_holding():
+    p = _portfolio({"AAPL": 1.0})
+    assert report.build_portfolio_panel(p, "1y", "^GSPC") is not None
+
+
+def test_portfolio_panel_survives_an_undefined_correlation():
+    # A holding that never moves has no correlation to anything.
+    p = _portfolio({"AAPL": 0.5, "FLAT": 0.5}, {"FLAT": [0.0] * 200})
+    assert report.build_portfolio_panel(p, "1y", "^GSPC") is not None
+
+
 def test_panel_renders_without_a_benchmark():
     idx = pd.bdate_range("2022-01-03", periods=30)
     df = pd.DataFrame({"Close": 10.0, "Adj Close": 10.0, "Volume": 5}, index=idx)

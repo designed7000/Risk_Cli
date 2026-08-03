@@ -20,6 +20,25 @@ def offline(monkeypatch):
     return df
 
 
+@pytest.fixture
+def offline_varied(monkeypatch):
+    """Distinct series per ticker, so correlations are not degenerate."""
+    import numpy as np
+
+    idx = pd.bdate_range("2022-01-03", periods=301)
+    rng = np.random.RandomState(4)
+
+    def fake_fetch(ticker, period="1y", interval="1d"):
+        rets = rng.normal(0.0004, 0.011, 300)
+        prices = pd.Series([100.0] + list(100 * (1 + pd.Series(rets)).cumprod()), index=idx)
+        df = pd.DataFrame(
+            {"Close": prices, "Adj Close": prices, "Volume": 1_000}, index=idx
+        )
+        return df, {"name": f"{ticker} Inc", "currency": "USD"}
+
+    monkeypatch.setattr(data, "fetch_price_and_meta", fake_fetch)
+
+
 @pytest.mark.parametrize(
     "given,expected",
     [("0.03", 0.03), ("3%", 0.03), ("3", 0.03), ("0", 0.0), ("", 0.0), ("abc", 0.0)],
@@ -89,3 +108,60 @@ def test_fetch_failure_exits_nonzero(monkeypatch, capsys):
 def test_compare_mode_renders_both_periods(offline, capsys):
     assert cli.main(["AAPL", "--compare", "--compare-period", "3y"]) == 0
     assert "AAPL" in capsys.readouterr().out
+
+
+# --- portfolio mode ------------------------------------------------------
+
+
+def test_one_ticker_still_gives_the_single_name_report(offline, capsys):
+    assert cli.main(["AAPL"]) == 0
+    out = capsys.readouterr().out
+    assert "Risk Grade" in out
+    assert "Diversification" not in out
+
+
+def test_several_bare_tickers_give_an_equal_weighted_portfolio(offline_varied, capsys):
+    assert cli.main(["AAPL", "MSFT", "TLT"]) == 0
+    out = capsys.readouterr().out
+    assert "Diversification" in out
+    assert "33.3" in out  # equal weights
+
+
+def test_explicit_weights_are_reported_back(offline_varied, capsys):
+    assert cli.main(["AAPL=0.5", "MSFT=0.5"]) == 0
+    assert "50.0" in capsys.readouterr().out
+
+
+def test_a_bad_weight_is_a_clean_error_not_a_traceback(offline_varied, capsys):
+    assert cli.main(["AAPL=oops", "MSFT=1"]) == 2
+    assert "weight" in capsys.readouterr().out.lower()
+
+
+def test_mixing_weighted_and_bare_tickers_is_a_clean_error(offline_varied, capsys):
+    assert cli.main(["AAPL=0.5", "MSFT"]) == 2
+    assert capsys.readouterr().out.strip() != ""
+
+
+def test_portfolio_json_export_includes_positions(offline_varied, tmp_path):
+    out = tmp_path / "p.json"
+    assert cli.main(["AAPL=0.6", "MSFT=0.4", "--export", str(out)]) == 0
+
+    payload = json.loads(out.read_text())
+    assert payload["diversification_ratio"] > 0
+    assert {p["ticker"] for p in payload["positions"]} == {"AAPL", "MSFT"}
+    assert payload["positions"][0]["risk_share"] > 0
+
+
+def test_portfolio_csv_export_is_a_position_table(offline_varied, tmp_path):
+    out = tmp_path / "p.csv"
+    assert cli.main(["AAPL=0.6", "MSFT=0.4", "--export", str(out)]) == 0
+
+    lines = out.read_text().splitlines()
+    assert lines[0].startswith("ticker,weight")
+    assert len(lines) == 4  # header + 2 positions + portfolio total
+    assert lines[-1].startswith("PORTFOLIO")
+
+
+def test_portfolio_mode_ignores_compare(offline_varied, capsys):
+    # --compare is a single-name feature; it should not crash a portfolio run
+    assert cli.main(["AAPL", "MSFT", "--compare"]) == 0

@@ -8,6 +8,7 @@ import argparse
 import csv
 import json
 import shutil
+from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
@@ -17,7 +18,7 @@ from rich.panel import Panel
 from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
-from . import data, metrics, report
+from . import data, metrics, portfolio, report
 
 console = Console()
 
@@ -28,8 +29,25 @@ SPARK_MARGIN = 40  # room for the label column and panel borders
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="riskcli", description="Print a compact risk report for a ticker")
-    p.add_argument("ticker", nargs="?", help="Ticker symbol to analyze (if omitted you'll be prompted)")
+    p = argparse.ArgumentParser(
+        prog="riskcli",
+        description="Print a compact risk report for a ticker or a portfolio",
+        epilog=(
+            "examples:\n"
+            "  riskcli AAPL                        single-name report\n"
+            "  riskcli AAPL MSFT TLT               portfolio, equal weights\n"
+            "  riskcli AAPL=0.4 MSFT=0.4 TLT=0.2   portfolio, explicit weights\n"
+            "  riskcli SPY=1.3 TLT=-0.3            shorts are allowed"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "tickers",
+        nargs="*",
+        metavar="TICKER[=WEIGHT]",
+        help="One ticker for a single-name report, or several for a portfolio "
+        "(weights optional; equal if omitted). Omit entirely to be prompted.",
+    )
     p.add_argument("--period", default="1y", help="Period to download (e.g. 1mo,3mo,6mo,1y,2y,5y,10y,ytd,max)")
     p.add_argument("--interval", default="1d", help="Data interval (e.g. 1d, 1wk, 1h). Annualization follows the interval.")
     p.add_argument("--benchmark", default="^GSPC", help="Benchmark ticker for beta (default: ^GSPC)")
@@ -105,13 +123,95 @@ def _export(path: Path, m: metrics.Metrics, ticker: str, period: str, benchmark:
     return 0
 
 
+def _portfolio_export(path: Path, p, period: str, benchmark: str) -> int:
+    """JSON carries the whole structure; CSV is the position table."""
+    suffix = path.suffix.lower()
+    positions = [asdict(pos) for pos in p.positions]
+
+    if suffix == ".json":
+        out = {
+            "period": period,
+            "benchmark": benchmark,
+            "positions": positions,
+            "correlation": p.correlation.to_dict(),
+            "weighted_avg_vol": p.weighted_avg_vol,
+            "diversification_ratio": p.diversification_ratio,
+            "parametric_var_95": p.parametric_var_95,
+            "observations": p.observations,
+            "portfolio": metrics.metrics_to_dict(p.metrics),
+        }
+        path.write_text(json.dumps(out, default=str, indent=2))
+    elif suffix == ".csv":
+        fields = ["ticker", "weight", "annual_vol", "corr_to_portfolio",
+                  "component_var", "risk_share"]
+        with path.open("w", newline="") as fh:
+            writer = csv.DictWriter(fh, fieldnames=fields)
+            writer.writeheader()
+            writer.writerows(positions)
+            writer.writerow({
+                "ticker": "PORTFOLIO",
+                "weight": 1.0,
+                "annual_vol": p.metrics.annual_vol,
+                "corr_to_portfolio": 1.0,
+                "component_var": p.parametric_var_95,
+                "risk_share": 1.0,
+            })
+    else:
+        _error(f"unknown export format '{path.suffix}': use .json or .csv")
+        return 2
+    return 0
+
+
+def run_portfolio(args) -> int:
+    """Fetch every holding, aggregate, and render the portfolio report."""
+    try:
+        weights = portfolio.parse_positions(args.tickers)
+    except ValueError as e:
+        _error(str(e))
+        return 2
+
+    frames = {}
+    for ticker in weights:
+        try:
+            frames[ticker], _ = data.fetch_price_and_meta(
+                ticker, period=args.period, interval=args.interval
+            )
+        except Exception as e:
+            _error(f"could not fetch {ticker}: {e}")
+            return 2
+
+    try:
+        bench_df, _ = data.fetch_price_and_meta(
+            args.benchmark, period=args.period, interval=args.interval
+        )
+    except Exception:
+        bench_df = None
+
+    try:
+        p = portfolio.compute_portfolio(frames, weights, bench_df=bench_df, rf=args.rf)
+    except ValueError as e:
+        _error(str(e))
+        return 3
+
+    console.print(report.build_portfolio_panel(p, args.period, args.benchmark))
+
+    if args.export:
+        return _portfolio_export(Path(args.export), p, args.period, args.benchmark)
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     args.rf = parse_rf(args.rf)
 
-    if not args.ticker:
+    if not args.tickers:
         args = interactive_menu(args)
 
+    # One instrument is the single-name report; more than one is a portfolio.
+    if len(args.tickers) > 1 or any("=" in t for t in args.tickers):
+        return run_portfolio(args)
+
+    args.ticker = args.tickers[0]
     term_cols = shutil.get_terminal_size((100, 20)).columns
     side_by_side, spark_width = layout(term_cols, args.compare)
 
@@ -156,7 +256,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
 
 MENU = [
-    ("1", "ticker", "Ticker (e.g. AAPL)"),
+    ("1", "ticker", "Ticker, or several for a portfolio (AAPL MSFT=0.4)"),
     ("2", "period", "Period (1mo,3mo,6mo,1y,2y,5y,10y,ytd,max)"),
     ("3", "interval", "Interval (e.g. 1d, 1wk)"),
     ("4", "benchmark", "Benchmark ticker"),
@@ -222,7 +322,12 @@ def interactive_menu(parsed_args: argparse.Namespace) -> argparse.Namespace:
                 console.print("Please enter a ticker before running.")
                 pause()
                 continue
-            return argparse.Namespace(**{**state, "export": state["export"] or None})
+            # The ticker field doubles as a portfolio spec: "AAPL MSFT TLT".
+            settings = {k: v for k, v in state.items() if k != "ticker"}
+            return argparse.Namespace(
+                tickers=state["ticker"].split(),
+                **{**settings, "export": state["export"] or None},
+            )
         else:
             current = str(state[action])
             state[action] = (Prompt.ask(prompts[action], default=current) or current).strip()

@@ -196,6 +196,34 @@ def compute_metrics(
     if bench_df is not None and not bench_df.empty:
         br = _prices(bench_df).pct_change().dropna()
 
+    return metrics_from_returns(
+        ar,
+        wealth=prices,
+        bench_returns=br,
+        rf=rf,
+        periods_per_year=ppy,
+        avg_value_traded=_avg_value_traded(asset_df),
+    )
+
+
+def metrics_from_returns(
+    returns: pd.Series,
+    wealth: pd.Series,
+    bench_returns: Optional[pd.Series] = None,
+    rf: float = 0.0,
+    periods_per_year: float = TRADING_DAYS,
+    avg_value_traded: float = 0.0,
+) -> Metrics:
+    """Metric set for any return stream, given its wealth index for drawdown.
+
+    Shared by the single-name path and the portfolio path so both report the
+    same quantities computed the same way.
+    """
+    ar = returns
+    br = bench_returns
+    ppy = periods_per_year
+    prices = wealth
+
     rf_period = (1.0 + rf) ** (1.0 / ppy) - 1.0
     excess = ar - rf_period
 
@@ -229,7 +257,7 @@ def compute_metrics(
         beta=beta,
         alpha=alpha,
         r2=r2,
-        avg_daily_dollar_vol=_avg_value_traded(asset_df),
+        avg_daily_dollar_vol=avg_value_traded,
         periods_per_year=ppy,
     )
 
