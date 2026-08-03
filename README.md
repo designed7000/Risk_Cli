@@ -29,6 +29,25 @@ hand-derived expected value.
 
 ## Install
 
+One command, no clone. Either tool installs `riskcli` onto your PATH in its
+own isolated environment:
+
+```bash
+uv tool install git+https://github.com/designed7000/Risk_Cli
+```
+
+```bash
+pipx install git+https://github.com/designed7000/Risk_Cli
+```
+
+To try it without installing anything at all:
+
+```bash
+uvx --from git+https://github.com/designed7000/Risk_Cli riskcli AAPL
+```
+
+From a checkout, for development:
+
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
