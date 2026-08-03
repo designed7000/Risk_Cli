@@ -1,153 +1,152 @@
 # riskcli — Risk Evaluation CLI
 
+[![tests](https://github.com/designed7000/Risk_Cli/actions/workflows/tests.yml/badge.svg)](https://github.com/designed7000/Risk_Cli/actions/workflows/tests.yml)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue?style=flat-square&logo=python)](https://www.python.org/)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-pytest-orange?style=flat-square)](#)
 
-> Production-minded terminal tool that downloads adjusted market prices and prints a compact, human-friendly risk report for a given ticker.
+> A terminal tool that downloads adjusted market prices and prints a compact risk report for a ticker.
 
 <p align="center">
 	<img src="docs/Screenshot.png" alt="riskcli interactive" width="640"/>
 </p>
 
-Summary
--------
+## Summary
 
-riskcli is a lightweight Python CLI that fetches historical price series (via `yfinance`), computes standard risk and performance metrics, and renders a readable terminal report with `rich`.
+`riskcli` fetches historical prices via `yfinance`, computes standard risk and
+performance metrics, and renders them with `rich`. The metric layer is pure
+pandas/numpy with no network, so every number is unit-tested against a
+hand-derived expected value.
 
-Key features
-------------
-- Clean terminal reports (summary panel + metrics table + simple risk grade)
-- Core metrics: annual return, annual vol, Sharpe, Sortino, Max Drawdown, Calmar, VaR/CVaR, Beta/Alpha/R²
-- Interactive menu with numeric shortcuts and a compare mode (two periods side-by-side)
-- Export metrics to JSON or CSV
-- Small unit test suite (no network calls)
+## Features
 
-Quick links
------------
-- Source: `riskcli/`
-- Tests: `tests/`
-- Docs / screenshot: `docs/screenshot.svg`
+- Summary panel, metrics table, and a coarse Low/Medium/High risk grade
+- Annual return (CAGR), annual vol, Sharpe, Sortino, max drawdown, Calmar,
+  historical VaR/CVaR, skew, excess kurtosis, CAPM beta / Jensen's alpha / R²
+- Annualization inferred from the bar interval, so `1wk` and `1h` are correct
+- Interactive menu with numeric shortcuts and a two-period compare mode
+- JSON / CSV export
+- Test suite runs offline
 
-Requirements
-------------
-- Python 3.11+
-- See `requirements.txt` for full dependency list (pandas, numpy, yfinance, rich, pytest)
+## Install
 
-Installation
-------------
-Create a virtual environment and install dependencies:
+One command, no clone. Either tool installs `riskcli` onto your PATH in its
+own isolated environment:
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+uv tool install git+https://github.com/designed7000/Risk_Cli
 ```
-
-Run tests:
 
 ```bash
-python -m pytest -q
+pipx install git+https://github.com/designed7000/Risk_Cli
 ```
 
-Usage
------
-Non-interactive (quick report):
+To try it without installing anything at all:
 
 ```bash
-python -m riskcli AAPL --period 1y --interval 1d --benchmark ^GSPC --rf 0.02
+uvx --from git+https://github.com/designed7000/Risk_Cli riskcli AAPL
 ```
 
-Interactive menu:
+From a checkout, for development:
 
 ```bash
-python -m riskcli
+python -m venv .venv && source .venv/bin/activate
+pip install -e ".[dev]"
 ```
 
-Interactive menu details
-------------------------
-When started without a ticker the CLI opens a boxed interactive panel showing the current state (ticker, period, interval, rf, compare, etc.). Shortcuts are numeric and shown on separate lines for clarity.
+## Usage
 
-Default numeric shortcuts (interactive menu):
-
-- [1] ticker — set the ticker (e.g. AAPL)
-- [2] period — set the yfinance period (e.g. 1y)
-- [3] interval — set data interval (e.g. 1d)
-- [4] benchmark — set benchmark ticker for beta (default `^GSPC`)
-- [5] rf — set annual risk-free rate (accepts `0.02`, `2%`, or `2` → normalized to `0.02`)
-- [6] export — set an export path (`.json` or `.csv`)
-- [7] compare — toggle compare mode on/off
-- [8] compare_period — set the second period used in compare mode (e.g. `3y`)
-- [9] run — fetch data and display the report
-- [0] quit — exit the menu
-
-Compare mode
-------------
-Set `compare` to `True` in the interactive menu or pass `--compare --compare-period 3y` on the CLI to display two period windows side-by-side when the terminal is wide.
-
-Risk-free handling & formatting
---------------------------------
-- `--rf` accepts decimal (0.03), percent strings (3%), or shorthand integers (3 -> 0.03). The CLI normalizes this once and `metrics` converts to a daily rate via:
-
-```py
-rf_daily = (1 + rf_annual) ** (1/252) - 1
+```bash
+riskcli AAPL --period 1y --benchmark ^GSPC --rf 0.04
 ```
 
-- Unitless ratios (Sharpe, Sortino, Beta, Calmar) are shown as plain numbers. Percent metrics and R² are shown as percentages.
+Without a ticker it opens the interactive menu:
 
-Network resilience (rate limits)
--------------------------------
-The CLI uses `yfinance` and may encounter remote rate-limits. To reduce failures the fetch path includes:
+```bash
+riskcli
+```
 
-- A small in-memory cache (300s TTL) per `(ticker, period, interval)` during interactive sessions.
-- A 3-attempt exponential backoff with jitter for transient failures.
+From a checkout without installing, `python -m riskcli AAPL` works the same way.
 
+| Flag | Default | Notes |
+| --- | --- | --- |
+| `--period` | `1y` | `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `10y`, `ytd`, `max` |
+| `--interval` | `1d` | `1d`, `1wk`, `1mo`, `1h` — annualization follows this |
+| `--benchmark` | `^GSPC` | Used for beta/alpha/R². Optional; skipped if it fails |
+| `--rf` | `0.0` | Annual risk-free. Accepts `0.04`, `4%` or `4` |
+| `--export` | — | `.json` or `.csv` |
+| `--compare` | off | Adds `--compare-period` (default `3y`) side by side |
 
-Export
-------
-Use `--export out.json` or `--export out.csv` to save computed metrics and contextual fields for further analysis.
+## Metric conventions
 
-Project structure
------------------
+These are the choices behind the numbers. They are the conventional ones, but
+they are worth stating because implementations differ:
+
+- **Returns** are simple (not log) and computed from adjusted closes, so
+  dividends are included.
+- **Annualization** uses the bar frequency inferred from the index: 252 for
+  daily, 52 weekly, 12 monthly, and `252 × bars-per-session` for intraday.
+  A fixed 252 would overstate intraday vol by roughly `√6.5`.
+- **Annual return** is geometric (CAGR). **Sharpe** and **Sortino** use the
+  *arithmetic* mean excess return in the numerator — the standard convention,
+  and deliberately not the same number as the CAGR.
+- **Risk-free** is converted per bar as `(1 + rf) ** (1 / periods_per_year) - 1`.
+- **Sortino** divides by the lower partial standard deviation below the
+  risk-free MAR, not by the stdev of the negative returns only.
+- **Max drawdown** is stored as a positive magnitude and displayed negative.
+- **VaR/CVaR** are single-bar historical (non-parametric) figures at 95%,
+  shown as negative returns. They are `NaN` below 100 observations rather than
+  reported from a sample too small to mean anything.
+- **Alpha** is Jensen's alpha: the intercept of excess asset returns regressed
+  on excess benchmark returns, then annualized. It is net of `--rf`.
+- **Average value traded** uses unadjusted close × volume.
+
+The risk grade is a deliberately coarse heuristic over vol, drawdown and tail
+loss — a conversation starter, not a model output.
+
+## Development
+
+```bash
+pytest
+```
+
+The suite covers the metric formulas against hand-computed values, the risk
+grade, the formatting helpers, the cache/retry/metadata behaviour of the data
+layer, and the CLI end to end with the fetch layer stubbed. Nothing touches the
+network.
+
 ```
 ./
-├── docs/                  # screenshots and small assets
-├── riskcli/               # package source
-├── tests/                 # unit tests (no network)
-├── requirements.txt
-├── README.md
-└── LICENSE
+├── .github/workflows/    # CI
+├── docs/                 # screenshots
+├── riskcli/              # package source
+│   ├── cli.py            # argument parsing, interactive menu, export
+│   ├── data.py           # yfinance fetch, cache, retry, metadata
+│   ├── metrics.py        # pure metric functions (no I/O)
+│   ├── report.py         # rich rendering and the risk grade
+│   └── utils.py          # number formatting, sparkline
+└── tests/
 ```
 
-Development notes
------------------
-- Keep `yfinance` network calls isolated for easier testing.
-- Add tests for numeric formatting and metric edge-cases.
-
-
+Known limits, stated plainly: prices come from `yfinance`, which is a scraped
+and rate-limited source, not an exchange feed. The cache is per-process, so it
+helps repeat runs inside the interactive menu and nothing else. Beta is a
+single-factor OLS estimate on overlapping bars with no correction for stale
+prices, so it is noisy for illiquid names. Single instrument only — there is no
+portfolio aggregation yet.
 
 ## Contributing
 
-Here's how to get started:
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/amazing-feature`
+3. Make changes, add tests, run `pytest`
+4. Commit and push, then open a pull request
 
-1. **Fork the repository**
-2. **Create a feature branch**: `git checkout -b feature/amazing-feature`
-3. **Make changes and test thoroughly**
-4. **Commit with clear messages**: `git commit -m 'Add amazing feature'`
-5. **Push to branch**: `git push origin feature/amazing-feature`
-6. **Create Pull Request**
+## Author
 
-
-
-## 👤 Author
-
-**Your Name**
+**Alexandros Chortis**
 - GitHub: [@designed7000](https://github.com/designed7000)
-- LinkedIn: [Alex_Chortis](https://www.linkedin.com/in/alexandros-c-225804103/)
-- Email: alexander.tux@gmail.com
+- LinkedIn: [alexandros-c](https://www.linkedin.com/in/alexandros-c-225804103/)
 
+## License
 
-
-License
--------
-This project is licensed under the MIT License (see `LICENSE`).
+MIT — see [LICENSE](LICENSE).
