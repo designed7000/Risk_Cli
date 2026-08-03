@@ -37,6 +37,14 @@ def test_monthly_bars_annualize_at_12():
     assert metrics.infer_periods_per_year(idx) == pytest.approx(12.0)
 
 
+@pytest.mark.parametrize("unit", ["ns", "us", "ms", "s"])
+def test_annualization_ignores_the_index_time_resolution(unit):
+    # pandas hands back datetime64 in varying units depending on version and
+    # constructor; the annualization factor must not depend on which.
+    idx = pd.date_range("2022-01-03", periods=104, freq="W").as_unit(unit)
+    assert metrics.infer_periods_per_year(idx) == pytest.approx(52.0)
+
+
 # --- drawdown ------------------------------------------------------------
 
 

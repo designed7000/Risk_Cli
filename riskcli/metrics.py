@@ -61,8 +61,10 @@ def infer_periods_per_year(index) -> float:
     if len(idx) < 3:
         return float(TRADING_DAYS)
 
-    gaps = np.diff(idx.asi8) / 86_400e9  # nanoseconds -> days
-    spacing = float(np.median(gaps))
+    # Convert explicitly: `asi8` is in whatever unit the index happens to
+    # carry, which varies by pandas version and constructor.
+    gaps = np.diff(idx.values).astype("timedelta64[ms]").astype(np.float64)
+    spacing = float(np.median(gaps)) / 86_400_000.0  # milliseconds -> days
     if spacing <= 0:
         return float(TRADING_DAYS)
 
