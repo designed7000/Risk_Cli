@@ -178,8 +178,13 @@ network.
 ```
 
 Known limits, stated plainly: prices come from `yfinance`, which is a scraped
-and rate-limited source, not an exchange feed. The cache is per-process, so it
-helps repeat runs inside the interactive menu and nothing else. Beta is a
+and rate-limited source, not an exchange feed. Because of that the fetch layer
+is deliberately frugal — one request per symbol, with the name/currency lookup
+(two further requests) skipped wherever the caller discards it, and a rate limit
+failing immediately rather than being retried into a deeper cooldown. If you do
+get throttled, wait a few minutes; the limit is not published and retrying
+extends it. The cache is per-process, so it helps repeat runs inside the
+interactive menu and nothing else. Beta is a
 single-factor OLS estimate on overlapping bars with no correction for stale
 prices, so it is noisy for illiquid names. The covariance matrix behind the risk
 attribution is a plain sample estimate over the whole window — it is not

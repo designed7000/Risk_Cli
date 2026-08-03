@@ -13,8 +13,9 @@ def offline(monkeypatch):
     prices = pd.Series(range(100, 400), index=idx, dtype=float)
     df = pd.DataFrame({"Close": prices, "Adj Close": prices, "Volume": 1_000}, index=idx)
 
-    def fake_fetch(ticker, period="1y", interval="1d"):
-        return df.copy(), {"name": f"{ticker} Inc", "currency": "USD"}
+    def fake_fetch(ticker, period="1y", interval="1d", with_meta=True):
+        meta = {"name": f"{ticker} Inc", "currency": "USD"} if with_meta else {}
+        return df.copy(), meta
 
     monkeypatch.setattr(data, "fetch_price_and_meta", fake_fetch)
     return df
@@ -28,13 +29,14 @@ def offline_varied(monkeypatch):
     idx = pd.bdate_range("2022-01-03", periods=301)
     rng = np.random.RandomState(4)
 
-    def fake_fetch(ticker, period="1y", interval="1d"):
+    def fake_fetch(ticker, period="1y", interval="1d", with_meta=True):
         rets = rng.normal(0.0004, 0.011, 300)
         prices = pd.Series([100.0] + list(100 * (1 + pd.Series(rets)).cumprod()), index=idx)
         df = pd.DataFrame(
             {"Close": prices, "Adj Close": prices, "Volume": 1_000}, index=idx
         )
-        return df, {"name": f"{ticker} Inc", "currency": "USD"}
+        meta = {"name": f"{ticker} Inc", "currency": "USD"} if with_meta else {}
+        return df, meta
 
     monkeypatch.setattr(data, "fetch_price_and_meta", fake_fetch)
 
@@ -160,6 +162,65 @@ def test_portfolio_csv_export_is_a_position_table(offline_varied, tmp_path):
     assert lines[0].startswith("ticker,weight")
     assert len(lines) == 4  # header + 2 positions + portfolio total
     assert lines[-1].startswith("PORTFOLIO")
+
+
+def test_a_rate_limit_is_reported_once_not_per_holding(monkeypatch, capsys):
+    def limited(*a, **k):
+        raise data.RateLimited("Yahoo is rate limiting this client. Wait a few minutes.")
+
+    monkeypatch.setattr(data, "fetch_price_and_meta", limited)
+    assert cli.main(["AAPL", "MSFT", "TLT"]) == 2
+
+    out = capsys.readouterr().out
+    assert out.lower().count("rate limiting") == 1
+    assert "could not fetch" not in out.lower()
+
+
+def test_a_rate_limit_on_a_single_name_is_stated_plainly(monkeypatch, capsys):
+    def limited(*a, **k):
+        raise data.RateLimited("Yahoo is rate limiting this client. Wait a few minutes.")
+
+    monkeypatch.setattr(data, "fetch_price_and_meta", limited)
+    assert cli.main(["AAPL"]) == 2
+    assert "wait a few minutes" in capsys.readouterr().out.lower()
+
+
+def test_a_portfolio_run_makes_one_request_per_symbol(monkeypatch, capsys):
+    """Metadata is two extra requests per ticker and the portfolio view does
+    not use it. Against a rate-limited source that waste is the whole problem.
+    """
+    calls = []
+    idx = pd.bdate_range(end="2026-08-04", periods=300)
+
+    class CountingTicker:
+        def __init__(self, symbol):
+            self.symbol = symbol
+
+        @property
+        def fast_info(self):
+            calls.append(f"meta:{self.symbol}")
+            return {}
+
+        def get_info(self):
+            calls.append(f"meta:{self.symbol}")
+            return {}
+
+        def history(self, period=None, interval=None, auto_adjust=None):
+            calls.append(f"history:{self.symbol}")
+            px = pd.Series(range(100, 400), index=idx, dtype=float)
+            return pd.DataFrame({"Close": px, "Volume": 1_000}, index=idx)
+
+    monkeypatch.setattr(data.yf, "Ticker", CountingTicker)
+    data.clear_cache()
+
+    assert cli.main(["AAPL", "MSFT", "TLT"]) == 0
+
+    assert calls == [
+        "history:AAPL",
+        "history:MSFT",
+        "history:TLT",
+        "history:^GSPC",
+    ]
 
 
 def test_portfolio_mode_ignores_compare(offline_varied, capsys):

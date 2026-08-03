@@ -99,7 +99,9 @@ def _load(ticker: str, period: str, interval: str, benchmark: str, rf: float):
     """Fetch a ticker and its benchmark, returning (df, meta, metrics)."""
     df, meta = data.fetch_price_and_meta(ticker, period=period, interval=interval)
     try:
-        bench_df, _ = data.fetch_price_and_meta(benchmark, period=period, interval=interval)
+        bench_df, _ = data.fetch_price_and_meta(
+            benchmark, period=period, interval=interval, with_meta=False
+        )
     except Exception:
         bench_df = None  # benchmark is optional; beta/alpha come back blank
     return df, meta, metrics.compute_metrics(df, bench_df, rf=rf)
@@ -174,15 +176,20 @@ def run_portfolio(args) -> int:
     for ticker in weights:
         try:
             frames[ticker], _ = data.fetch_price_and_meta(
-                ticker, period=args.period, interval=args.interval
+                ticker, period=args.period, interval=args.interval, with_meta=False
             )
+        except data.RateLimited as e:
+            # Naming a ticker here is noise: the limit is on the client, not
+            # on the symbol, and the remaining holdings would all fail too.
+            _error(str(e))
+            return 2
         except Exception as e:
             _error(f"could not fetch {ticker}: {e}")
             return 2
 
     try:
         bench_df, _ = data.fetch_price_and_meta(
-            args.benchmark, period=args.period, interval=args.interval
+            args.benchmark, period=args.period, interval=args.interval, with_meta=False
         )
     except Exception:
         bench_df = None
@@ -217,7 +224,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         asset_df, asset_meta, m = _load(args.ticker, args.period, args.interval, args.benchmark, args.rf)
-    except ValueError as e:
+    except (ValueError, data.RateLimited) as e:
         _error(str(e))
         return 2
     except Exception as e:
