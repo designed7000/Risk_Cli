@@ -1,6 +1,4 @@
-"""Report tests: the risk grade and the number formatting."""
-import math
-
+"""Report tests: the risk grade, the number formatting and the rendering."""
 import pandas as pd
 import pytest
 
@@ -24,7 +22,7 @@ def _metrics(**overrides) -> Metrics:
         beta=1.0,
         alpha=0.0,
         r2=0.5,
-        avg_daily_dollar_vol=1e6,
+        avg_value_traded_per_bar=1e6,
         periods_per_year=252.0,
     )
     base.update(overrides)
@@ -123,5 +121,33 @@ def test_portfolio_panel_survives_an_undefined_correlation():
 def test_panel_renders_without_a_benchmark():
     idx = pd.bdate_range("2022-01-03", periods=30)
     df = pd.DataFrame({"Close": 10.0, "Adj Close": 10.0, "Volume": 5}, index=idx)
-    panel = report.build_report_panel("TEST", {"name": "Test Co"}, df, "1y", "^GSPC", _metrics(beta=None, alpha=None, r2=None))
-    assert panel is not None
+
+    out = _render(
+        report.build_report_panel(
+            "TEST", {"name": "Test Co"}, df, "1y", "^GSPC",
+            _metrics(beta=None, alpha=None, r2=None),
+        )
+    )
+
+    assert "Test Co" in out
+    assert "Annual Return (CAGR)" in out
+    assert "Risk Grade: Low" in out
+    # Beta / Alpha / R² are absent, so their rows must show the dash.
+    assert out.count(report.DASH) >= 3
+
+
+def test_panel_shows_the_drawdown_as_negative():
+    idx = pd.bdate_range("2022-01-03", periods=30)
+    df = pd.DataFrame({"Close": 10.0, "Adj Close": 10.0, "Volume": 5}, index=idx)
+    out = _render(
+        report.build_report_panel("TEST", {}, df, "1y", "^GSPC", _metrics(max_drawdown=0.3512))
+    )
+    assert "-35.12%" in out
+
+
+@pytest.mark.parametrize(
+    "ppy,expected",
+    [(252.0, "1d"), (365.25, "1d"), (52.0, "1wk"), (12.0, "1mo"), (1764.0, "1 bar")],
+)
+def test_var_label_names_the_bar_length(ppy, expected):
+    assert report._var_label(_metrics(periods_per_year=ppy)) == f"VaR 95% ({expected})"

@@ -7,7 +7,7 @@ Conventions, so the numbers are unambiguous:
 * Returns are simple (not log) and come from adjusted closes, so dividends
   are included.
 * Annualization uses the bar frequency inferred from the index, not a fixed
-  252 — weekly, monthly and intraday series annualize correctly.
+  252 — weekly, monthly, intraday and 24/7 series annualize correctly.
 * ``annual_return`` is geometric (CAGR). The Sharpe and Sortino numerators
   use the *arithmetic* mean excess return, which is the standard convention
   and is not the same number as the CAGR.
@@ -16,7 +16,9 @@ Conventions, so the numbers are unambiguous:
 * VaR/CVaR are single-bar historical (non-parametric) figures at the given
   confidence, expressed as negative returns.
 * ``alpha`` is Jensen's alpha: the intercept of excess asset returns
-  regressed on excess benchmark returns, then annualized.
+  regressed on excess benchmark returns, scaled to a year.
+* ``avg_value_traded_per_bar`` is per *bar*, so it is only a daily figure at
+  a daily interval.
 """
 from __future__ import annotations
 
@@ -27,7 +29,9 @@ import numpy as np
 import pandas as pd
 
 TRADING_DAYS = 252
+CALENDAR_DAYS = 365.25
 MIN_VAR_OBSERVATIONS = 100
+MIN_REGRESSION_OBSERVATIONS = 30
 
 
 @dataclass
@@ -46,15 +50,16 @@ class Metrics:
     beta: Optional[float]
     alpha: Optional[float]  # annualized Jensen's alpha
     r2: Optional[float]
-    avg_daily_dollar_vol: float
+    avg_value_traded_per_bar: float
     periods_per_year: float
 
 
 def infer_periods_per_year(index) -> float:
     """Annualization factor implied by the spacing of `index`.
 
-    Daily bars give 252, weekly 52, monthly 12; intraday bars give 252 times
-    the number of bars in a session. Falls back to 252 when the index is too
+    Daily bars give 252 on an exchange tape and 365.25 on a 24/7 one; weekly
+    52, monthly 12; intraday bars give the trading days in a year times the
+    number of bars in a session. Falls back to 252 when the index is too
     short to tell.
     """
     idx = pd.DatetimeIndex(index)
@@ -68,24 +73,40 @@ def infer_periods_per_year(index) -> float:
     if spacing <= 0:
         return float(TRADING_DAYS)
 
+    # Median spacing alone cannot tell a 24/7 tape from an exchange one: both
+    # sit at one day. Weekend bars can — an exchange has none, crypto has 2/7.
+    trades_weekends = float((idx.dayofweek >= 5).mean()) > 0.20
+    days_per_year = CALENDAR_DAYS if trades_weekends else float(TRADING_DAYS)
+
     if spacing < 1.0:
         # Intraday. Count the bars in a session rather than assuming its
         # length, so a 6.5h US session and a 24h crypto tape both work.
         sessions = idx.normalize().nunique()
-        return float(TRADING_DAYS) * (len(idx) / sessions)
+        return days_per_year * (len(idx) / sessions)
     if spacing <= 4.0:
-        return float(TRADING_DAYS)  # daily bars; weekend gaps are the minority
+        return days_per_year
     if spacing <= 10.0:
         return 52.0
     if spacing <= 45.0:
         return 12.0
-    return 365.25 / spacing
+    return CALENDAR_DAYS / spacing
+
+
+def price_column(df: pd.DataFrame) -> str:
+    """Adjusted close if present, otherwise close."""
+    return "Adj Close" if "Adj Close" in df.columns else "Close"
 
 
 def _prices(df: pd.DataFrame) -> pd.Series:
-    """Adjusted close if present, otherwise close."""
-    col = "Adj Close" if "Adj Close" in df.columns else "Close"
-    return pd.Series(df[col]).dropna().astype(float)
+    """Clean price series to compute from.
+
+    Non-positive prices are dropped as bad ticks. A real quote is never zero
+    or negative, and leaving one in poisons everything downstream: the bar out
+    of a zero is an infinite return, which turns the compounded return into
+    NaN and slips past the `gross <= 0` guard in `annualized_return`.
+    """
+    s = pd.Series(df[price_column(df)]).dropna().astype(float)
+    return s[s > 0.0]
 
 
 def annualized_return(returns: pd.Series, periods_per_year: float = TRADING_DAYS) -> float:
@@ -113,11 +134,14 @@ def max_drawdown(prices: pd.Series) -> float:
     silently wrong answers on sub-$1 series.
     """
     p = pd.Series(prices).dropna().astype(float)
-    p = p[p > 0]
     if p.empty:
         return 0.0
     peak = p.cummax()
-    return float(((peak - p) / peak).max())
+    # Deliberately no `p > 0` filter: dropping an interior zero would splice
+    # the peak straight onto the recovery and hide the loss that happened
+    # between them. [100, 50, 0, 80] is a 100% drawdown, not a 50% one.
+    worst = float(((peak - p) / peak).max())
+    return worst if np.isfinite(worst) else 0.0
 
 
 def historical_var_cvar(returns: pd.Series, alpha: float = 0.95) -> Tuple[float, float]:
@@ -132,12 +156,17 @@ def historical_var_cvar(returns: pd.Series, alpha: float = 0.95) -> Tuple[float,
 
 
 def tail_ratio(returns: pd.Series, p_high: float = 0.95, p_low: float = 0.05) -> float:
+    """Size of the right tail relative to the left, as a positive ratio.
+
+    Both tails are taken in magnitude, so a series that only ever loses gives
+    a small positive ratio rather than a negative one.
+    """
     r = pd.Series(returns).dropna()
     if r.empty:
         return float("nan")
-    high = float(r.quantile(p_high))
-    low = float(r.quantile(p_low))
-    return high / abs(low) if low != 0 else float("nan")
+    high = abs(float(r.quantile(p_high)))
+    low = abs(float(r.quantile(p_low)))
+    return high / low if low != 0 else float("nan")
 
 
 def beta_alpha_r2(
@@ -149,13 +178,15 @@ def beta_alpha_r2(
     """CAPM regression of excess asset returns on excess benchmark returns.
 
     Returns (beta, annualized Jensen's alpha, R²). `rf_period` is the
-    risk-free rate over one bar, not per year.
+    risk-free rate over one bar, not per year. All three come back as None
+    when the overlap is too short to carry information — a line through two
+    points fits perfectly and would report R² = 100%.
     """
     if bench_rets is None or len(bench_rets) == 0:
         return None, None, None
 
     df = pd.concat([asset_rets, bench_rets], axis=1).dropna()
-    if df.shape[0] < 2:
+    if df.shape[0] < MIN_REGRESSION_OBSERVATIONS:
         return None, None, None
 
     y = df.iloc[:, 0].to_numpy(dtype=float) - rf_period  # excess asset
@@ -168,7 +199,10 @@ def beta_alpha_r2(
 
     beta = float(((x - xm) * (y - ym)).sum() / denom)
     alpha_period = float(ym - beta * xm)
-    alpha_annual = (1.0 + alpha_period) ** periods_per_year - 1.0
+    # Scaled, not compounded. The intercept is fitted on arithmetic excess
+    # returns, so it annualizes the same way the Sharpe numerator does.
+    # Compounding it would also blow up at intraday frequencies.
+    alpha_annual = alpha_period * periods_per_year
 
     resid = y - (alpha_period + beta * x)
     ss_tot = float(((y - ym) ** 2).sum())
@@ -257,7 +291,7 @@ def metrics_from_returns(
         beta=beta,
         alpha=alpha,
         r2=r2,
-        avg_daily_dollar_vol=avg_value_traded,
+        avg_value_traded_per_bar=avg_value_traded,
         periods_per_year=ppy,
     )
 

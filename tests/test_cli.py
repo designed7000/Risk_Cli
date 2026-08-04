@@ -1,16 +1,21 @@
 """CLI tests. No network: the fetch layer is stubbed."""
+import argparse
+import csv
 import json
 
 import pandas as pd
 import pytest
 
-from riskcli import cli, data
+from riskcli import cli, data, metrics
 
 
-@pytest.fixture
-def offline(monkeypatch):
-    idx = pd.bdate_range("2022-01-03", periods=300)
-    prices = pd.Series(range(100, 400), index=idx, dtype=float)
+def _reject(constant):
+    raise ValueError(f"not valid JSON: {constant}")
+
+
+def _stub_fetch(monkeypatch, bars: int):
+    idx = pd.bdate_range("2022-01-03", periods=bars)
+    prices = pd.Series(range(100, 100 + bars), index=idx, dtype=float)
     df = pd.DataFrame({"Close": prices, "Adj Close": prices, "Volume": 1_000}, index=idx)
 
     def fake_fetch(ticker, period="1y", interval="1d", with_meta=True):
@@ -19,6 +24,17 @@ def offline(monkeypatch):
 
     monkeypatch.setattr(data, "fetch_price_and_meta", fake_fetch)
     return df
+
+
+@pytest.fixture
+def offline(monkeypatch):
+    return _stub_fetch(monkeypatch, 300)
+
+
+@pytest.fixture
+def short_series(monkeypatch):
+    """Under MIN_VAR_OBSERVATIONS, so VaR and CVaR come out NaN."""
+    return _stub_fetch(monkeypatch, 40)
 
 
 @pytest.fixture
@@ -43,10 +59,33 @@ def offline_varied(monkeypatch):
 
 @pytest.mark.parametrize(
     "given,expected",
-    [("0.03", 0.03), ("3%", 0.03), ("3", 0.03), ("0", 0.0), ("", 0.0), ("abc", 0.0)],
+    [
+        ("0.03", 0.03),
+        ("3%", 0.03),
+        ("3", 0.03),
+        ("0", 0.0),
+        ("0.5%", 0.005),
+        ("1", 0.01),  # 1%, not 100% — the boundary used to flip here
+        ("-3", -0.03),  # negatives scale too; they used to come out as -300%
+        ("-3%", -0.03),
+    ],
 )
 def test_risk_free_rate_parsing(given, expected):
     assert cli.parse_rf(given) == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("given", ["", "abc", "3%%", "nan", "inf"])
+def test_unparseable_risk_free_rate_is_rejected(given):
+    # Silently returning 0.0 changed Sharpe, Sortino and alpha with no notice.
+    with pytest.raises(argparse.ArgumentTypeError):
+        cli.parse_rf(given)
+
+
+def test_bad_risk_free_rate_exits_with_a_usage_error(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["AAPL", "--rf", "abc"])
+    assert exc.value.code == 2
+    assert "invalid risk-free rate" in capsys.readouterr().err
 
 
 def test_single_report_never_stretches_past_the_spark_cap():
@@ -85,7 +124,33 @@ def test_export_json_writes_every_metric(offline, tmp_path):
     payload = json.loads(out.read_text())
     assert payload["ticker"] == "AAPL"
     assert payload["period"] == "1y"
-    assert "sharpe" in payload and "max_drawdown" in payload
+    assert set(payload) >= set(metrics.Metrics.__dataclass_fields__)
+
+
+def test_export_json_is_parseable_when_metrics_are_nan(short_series, tmp_path):
+    # Under 100 observations VaR/CVaR are NaN by design, and bare NaN is not
+    # valid JSON — strict parsers reject the file outright.
+    out = tmp_path / "m.json"
+    assert cli.main(["AAPL", "--export", str(out)]) == 0
+
+    raw = out.read_text()
+    assert "NaN" not in raw
+    payload = json.loads(raw, parse_constant=_reject)
+    assert payload["var_95"] is None
+
+
+def test_export_csv_writes_nan_as_an_empty_field(short_series, tmp_path):
+    out = tmp_path / "m.csv"
+    assert cli.main(["AAPL", "--export", str(out)]) == 0
+
+    rows = dict(csv.reader(out.read_text().splitlines()[1:]))
+    assert rows["var_95"] == ""  # not the string "nan"
+
+
+def test_export_to_an_unwritable_path_is_an_error_not_a_traceback(offline, tmp_path, capsys):
+    out = tmp_path / "no-such-dir" / "m.json"
+    assert cli.main(["AAPL", "--export", str(out)]) == 2
+    assert "could not write" in capsys.readouterr().err
 
 
 def test_export_csv_writes_a_header_row(offline, tmp_path):
@@ -104,12 +169,42 @@ def test_fetch_failure_exits_nonzero(monkeypatch, capsys):
 
     monkeypatch.setattr(data, "fetch_price_and_meta", boom)
     assert cli.main(["ZZZZ"]) == 2
-    assert "ZZZZ" in capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert "ZZZZ" in captured.err  # errors belong on stderr, not stdout
+    assert captured.out == ""
 
 
 def test_compare_mode_renders_both_periods(offline, capsys):
+    # "AAPL" alone is satisfied by the first panel, so this test used to pass
+    # with compare mode disabled entirely. Both period labels must appear.
     assert cli.main(["AAPL", "--compare", "--compare-period", "3y"]) == 0
-    assert "AAPL" in capsys.readouterr().out
+    # "AAPL" alone is satisfied by the first panel, so this test used to pass
+    # with compare mode disabled entirely. Both period labels must appear.
+    out = capsys.readouterr().out
+    assert "1y vs" in out
+    assert "3y vs" in out
+
+
+def test_without_compare_only_one_period_renders(offline, capsys):
+    assert cli.main(["AAPL"]) == 0
+    out = capsys.readouterr().out
+    assert "1y vs" in out
+    assert "3y vs" not in out
+
+
+def test_menu_carries_every_parser_flag_through(monkeypatch):
+    # The namespace is layered over the parsed args, so a flag that exists on
+    # the parser but not in MENU still reaches main() with its default. The
+    # rest of the menu's behaviour is covered in test_menu.py.
+    it = iter(["ticker", "MSFT", "run"])
+    monkeypatch.setattr(cli.Prompt, "ask", staticmethod(lambda *a, **k: next(it)))
+    monkeypatch.setattr(cli.console, "clear", lambda: None)
+
+    args = cli.interactive_menu(cli.build_parser().parse_args([]))
+    parsed = cli.build_parser().parse_args(["MSFT"])
+
+    assert set(vars(parsed)) <= set(vars(args))
+    assert args.tickers == ["MSFT"]
 
 
 # --- portfolio mode ------------------------------------------------------
@@ -136,12 +231,12 @@ def test_explicit_weights_are_reported_back(offline_varied, capsys):
 
 def test_a_bad_weight_is_a_clean_error_not_a_traceback(offline_varied, capsys):
     assert cli.main(["AAPL=oops", "MSFT=1"]) == 2
-    assert "weight" in capsys.readouterr().out.lower()
+    assert "weight" in capsys.readouterr().err.lower()  # errors go to stderr
 
 
 def test_mixing_weighted_and_bare_tickers_is_a_clean_error(offline_varied, capsys):
     assert cli.main(["AAPL=0.5", "MSFT"]) == 2
-    assert capsys.readouterr().out.strip() != ""
+    assert capsys.readouterr().err.strip() != ""
 
 
 def test_portfolio_json_export_includes_positions(offline_varied, tmp_path):
@@ -171,9 +266,9 @@ def test_a_rate_limit_is_reported_once_not_per_holding(monkeypatch, capsys):
     monkeypatch.setattr(data, "fetch_price_and_meta", limited)
     assert cli.main(["AAPL", "MSFT", "TLT"]) == 2
 
-    out = capsys.readouterr().out
-    assert out.lower().count("rate limiting") == 1
-    assert "could not fetch" not in out.lower()
+    err = capsys.readouterr().err
+    assert err.lower().count("rate limiting") == 1
+    assert "could not fetch" not in err.lower()
 
 
 def test_a_rate_limit_on_a_single_name_is_stated_plainly(monkeypatch, capsys):
@@ -182,7 +277,7 @@ def test_a_rate_limit_on_a_single_name_is_stated_plainly(monkeypatch, capsys):
 
     monkeypatch.setattr(data, "fetch_price_and_meta", limited)
     assert cli.main(["AAPL"]) == 2
-    assert "wait a few minutes" in capsys.readouterr().out.lower()
+    assert "wait a few minutes" in capsys.readouterr().err.lower()
 
 
 def test_a_portfolio_run_makes_one_request_per_symbol(monkeypatch, capsys):
