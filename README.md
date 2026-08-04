@@ -14,15 +14,16 @@
 
 `riskcli` fetches historical prices via `yfinance`, computes standard risk and
 performance metrics, and renders them with `rich`. The metric layer is pure
-pandas/numpy with no network, so every number is unit-tested against a
-hand-derived expected value.
+pandas/numpy with no network, so the formulas are unit-tested against
+hand-derived expected values rather than against their own output.
 
 ## Features
 
 - Summary panel, metrics table, and a coarse Low/Medium/High risk grade
 - Annual return (CAGR), annual vol, Sharpe, Sortino, max drawdown, Calmar,
   historical VaR/CVaR, skew, excess kurtosis, CAPM beta / Jensen's alpha / R²
-- Annualization inferred from the bar interval, so `1wk` and `1h` are correct
+- Annualization inferred from the bar interval, so `1wk`, `1h` and 24/7
+  crypto tapes are all correct
 - **Portfolio mode**: correlation matrix, diversification ratio, and per-position
   risk attribution (component VaR and % of risk, which are not the weights)
 - Interactive menu with numeric shortcuts and a two-period compare mode
@@ -82,9 +83,14 @@ From a checkout without installing, `python -m riskcli AAPL` works the same way.
 | `--period` | `1y` | `1mo`, `3mo`, `6mo`, `1y`, `2y`, `5y`, `10y`, `ytd`, `max` |
 | `--interval` | `1d` | `1d`, `1wk`, `1mo`, `1h` — annualization follows this |
 | `--benchmark` | `^GSPC` | Used for beta/alpha/R². Optional; skipped if it fails |
-| `--rf` | `0.0` | Annual risk-free. Accepts `0.04`, `4%` or `4` |
-| `--export` | — | `.json` or `.csv` |
+| `--rf` | `0.0` | Annual risk-free. `0.04`, `4` and `4%` all mean 4% |
+| `--export` | — | `.json` or `.csv`. With `--compare`, exports `--period` only |
 | `--compare` | off | Adds `--compare-period` (default `3y`) side by side. Single-name only |
+
+`--rf` reads a bare magnitude of 1 or more as a percentage, so `4` is 4% and
+not 400%, and `-3` is -3%. Below 1 the value is already a decimal, so `0.04`
+is 4% and `0.5` is 50%. Anything unparseable is a usage error rather than a
+silent zero.
 
 ## Portfolio mode
 
@@ -117,10 +123,14 @@ These are the choices behind the numbers. They are the conventional ones, but
 they are worth stating because implementations differ:
 
 - **Returns** are simple (not log) and computed from adjusted closes, so
-  dividends are included.
+  dividends are included. Non-positive prices are dropped as bad ticks — a
+  zero mid-series makes the next bar an infinite return, which silently turns
+  the compounded return into `NaN`.
 - **Annualization** uses the bar frequency inferred from the index: 252 for
-  daily, 52 weekly, 12 monthly, and `252 × bars-per-session` for intraday.
-  A fixed 252 would overstate intraday vol by roughly `√6.5`.
+  daily bars on an exchange, 365.25 for a 24/7 tape, 52 weekly, 12 monthly,
+  and `trading-days × bars-per-session` for intraday. A fixed 252 would
+  overstate intraday vol by roughly `√6.5`, and understate a coin's CAGR by
+  about a third.
 - **Annual return** is geometric (CAGR). **Sharpe** and **Sortino** use the
   *arithmetic* mean excess return in the numerator — the standard convention,
   and deliberately not the same number as the CAGR.
@@ -130,11 +140,18 @@ they are worth stating because implementations differ:
 - **Max drawdown** is stored as a positive magnitude and displayed negative.
 - **VaR/CVaR** are single-bar historical (non-parametric) figures at 95%,
   shown as negative returns. They are `NaN` below 100 observations rather than
-  reported from a sample too small to mean anything.
+  reported from a sample too small to mean anything — so a `3mo` daily fetch,
+  or a `1y` weekly one, will dash them out.
 - **Alpha** is Jensen's alpha: the intercept of excess asset returns regressed
-  on excess benchmark returns, then annualized. It is net of `--rf`.
-- **Average value traded** uses unadjusted close × volume. It is per-instrument,
-  so the portfolio view omits it rather than printing a meaningless zero.
+  on excess benchmark returns, scaled by the periods in a year. It is net of
+  `--rf`. Scaled rather than compounded, so it annualizes the same way the
+  Sharpe numerator does and stays stable at intraday frequencies.
+- **Beta, alpha and R²** need at least 30 overlapping bars. Two points define
+  a line exactly, so a shorter overlap would report R² = 100%.
+- **Average value traded** uses unadjusted close × volume, and is per *bar* —
+  at a weekly interval it is a weekly figure, not a daily one. It is also
+  per-instrument, so the portfolio view omits it rather than printing a
+  meaningless zero.
 
 For portfolios specifically:
 
@@ -159,9 +176,9 @@ pytest
 ```
 
 The suite covers the metric formulas against hand-computed values, the risk
-grade, the formatting helpers, the cache/retry/metadata behaviour of the data
-layer, and the CLI end to end with the fetch layer stubbed. Nothing touches the
-network.
+grade, the formatting helpers, the rendered report, the cache/retry/timezone
+behaviour of the data layer, and the CLI and its interactive menu end to end
+with the fetch layer stubbed. Nothing touches the network.
 
 ```
 ./
@@ -186,10 +203,15 @@ get throttled, wait a few minutes; the limit is not published and retrying
 extends it. The cache is per-process, so it helps repeat runs inside the
 interactive menu and nothing else. Beta is a
 single-factor OLS estimate on overlapping bars with no correction for stale
-prices, so it is noisy for illiquid names. The covariance matrix behind the risk
-attribution is a plain sample estimate over the whole window — it is not
-shrunk, not exponentially weighted, and it assumes the correlations were stable
-across the period, which in a crisis they are not.
+prices, so it is noisy for illiquid names — and comparing a non-US ticker
+against the default `^GSPC` still matches two different trading calendars by
+date. Returns are differenced before the asset and benchmark are aligned, so a
+missing benchmark session biases beta slightly. The annualized figures have no
+minimum sample: a `1mo` fetch will happily report a CAGR extrapolated from
+twenty bars, so read them next to the bar count in the summary panel. The
+covariance matrix behind the risk attribution is a plain sample estimate over
+the whole window — it is not shrunk, not exponentially weighted, and it assumes
+the correlations were stable across the period, which in a crisis they are not.
 
 ## Contributing
 

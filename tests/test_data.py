@@ -1,8 +1,9 @@
 """Data-layer tests. No network: yfinance is stubbed."""
+import numpy as np
 import pandas as pd
 import pytest
 
-from riskcli import data
+from riskcli import data, metrics
 
 
 class FakeTicker:
@@ -91,6 +92,39 @@ def test_timezone_aware_index_is_made_naive(monkeypatch):
     assert df.index.tz is None
 
 
+def test_exchange_local_time_is_kept_not_converted_to_utc():
+    # yfinance stamps a daily bar at midnight in the exchange's timezone.
+    # Converting to UTC would move Frankfurt to 23:00 the previous day, so a
+    # German ticker and a US benchmark would share zero index values.
+    de = data._prepare(_frame(tz="Europe/Berlin"))
+    us = data._prepare(_frame(tz="America/New_York"))
+
+    assert str(de.index[0]) == "2022-01-03 00:00:00"
+    assert de.index.equals(us.index)
+
+
+def test_a_non_us_ticker_still_gets_a_beta(monkeypatch):
+    # The regression aligns asset and benchmark on the index. Under UTC the
+    # overlap was empty and beta/alpha/R² silently came back as None.
+    # Each exchange stamps the same trading day at its own local midnight.
+    de_idx = pd.date_range("2022-01-03", periods=120, freq="B", tz="Europe/Berlin")
+    us_idx = pd.date_range("2022-01-03", periods=120, freq="B", tz="America/New_York")
+    px = 100 * (1 + np.random.RandomState(5).normal(0, 0.01, 120)).cumprod()
+
+    asset = data._prepare(pd.DataFrame({"Close": px * 2}, index=de_idx))
+    bench = data._prepare(pd.DataFrame({"Close": px}, index=us_idx))
+
+    m = metrics.compute_metrics(asset, bench)
+    assert m.beta == pytest.approx(1.0)
+
+
+def test_prepare_does_not_mutate_the_callers_frame():
+    original = _frame(tz="America/New_York", with_adj=False)
+    data._prepare(original)
+    assert "Adj Close" not in original.columns
+    assert original.index.tz is not None
+
+
 def test_adj_close_is_synthesized_when_missing(monkeypatch):
     monkeypatch.setattr(data.yf, "Ticker", lambda t: FakeTicker(_frame(with_adj=False)))
     df, _ = data.fetch_price_and_meta("AAPL")
@@ -126,6 +160,19 @@ def test_giving_up_reraises_the_last_error(monkeypatch):
     monkeypatch.setattr(data.time, "sleep", lambda s: None)
     with pytest.raises(RuntimeError, match="connection reset"):
         data.fetch_price_and_meta("AAPL")
+
+
+def test_no_backoff_is_slept_after_the_final_attempt(monkeypatch):
+    # The last sleep was over half the total wait and bought nothing; the
+    # benchmark fetch goes through the same path, so it was paid twice.
+    slept = []
+    monkeypatch.setattr(data.yf, "Ticker", lambda t: FakeTicker(_frame(), fail_times=99))
+    monkeypatch.setattr(data.time, "sleep", slept.append)
+
+    with pytest.raises(RuntimeError):
+        data.fetch_price_and_meta("AAPL")
+
+    assert len(slept) == data.MAX_ATTEMPTS - 1
 
 
 def test_second_fetch_within_ttl_does_not_hit_the_network(monkeypatch):

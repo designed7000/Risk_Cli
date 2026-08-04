@@ -72,12 +72,18 @@ def build_meta(tk, ticker: str) -> Dict[str, Optional[object]]:
 
 
 def _prepare(df: pd.DataFrame) -> pd.DataFrame:
-    """Make the index tz-naive and guarantee an Adj Close column."""
+    """Return a copy with a tz-naive index and a guaranteed Adj Close.
+
+    The tz is *dropped*, not converted. yfinance stamps a daily bar at
+    midnight in the exchange's own timezone, so converting to UTC first would
+    push Frankfurt onto the previous calendar day and Tokyo onto a different
+    hour than New York. The benchmark regression aligns asset and benchmark
+    on the index, and under UTC a non-US ticker overlaps a US benchmark on
+    exactly zero bars — beta, alpha and R² silently come back empty.
+    """
+    df = df.copy()
     if getattr(df.index, "tz", None) is not None:
-        try:
-            df.index = df.index.tz_convert(None)
-        except (TypeError, AttributeError):
-            df.index = df.index.tz_localize(None)
+        df.index = df.index.tz_localize(None)
 
     if "Adj Close" not in df.columns:
         df["Adj Close"] = df["Close"]

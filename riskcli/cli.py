@@ -7,7 +7,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import shutil
+import math
 from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
@@ -21,8 +21,8 @@ from rich.table import Table
 from . import data, metrics, portfolio, report
 
 console = Console()
+err_console = Console(stderr=True)
 
-SPARK_POINTS = 120
 SIDE_BY_SIDE_COLUMNS = 120
 MIN_SPARK, MAX_SPARK = 20, 60
 SPARK_MARGIN = 40  # room for the label column and panel borders
@@ -51,25 +51,34 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--period", default="1y", help="Period to download (e.g. 1mo,3mo,6mo,1y,2y,5y,10y,ytd,max)")
     p.add_argument("--interval", default="1d", help="Data interval (e.g. 1d, 1wk, 1h). Annualization follows the interval.")
     p.add_argument("--benchmark", default="^GSPC", help="Benchmark ticker for beta (default: ^GSPC)")
-    p.add_argument("--rf", default="0.0", help="Annual risk-free rate. Accepts 0.03, 3%% or 3 -> 0.03")
-    p.add_argument("--export", help="Optional path to export metrics as .json or .csv")
+    p.add_argument("--rf", default=0.0, type=parse_rf,
+                   help="Annual risk-free rate. 0.03, 3 and 3%% all mean 3%%; a bare value below 1 is read as a decimal")
+    p.add_argument("--export", help="Path to export metrics as .json or .csv (with --compare, exports --period only)")
     p.add_argument("--compare", action="store_true", help="Also report --compare-period (side-by-side when wide)")
     p.add_argument("--compare-period", default="3y", help="Second period used with --compare (default: 3y)")
     return p
 
 
-def parse_rf(val: Optional[str]) -> float:
-    """Normalize a risk-free input to an annual decimal. '3', '3%' -> 0.03."""
-    if val is None:
-        return 0.0
+def parse_rf(val) -> float:
+    """Normalize a risk-free input to an annual decimal.
+
+    '0.03', '3' and '3%' all mean 3%. A bare magnitude of 1 or more is read
+    as a percentage — so '3' is 3% and not 300%, and '-3' is -3% — while
+    anything below 1 is already a decimal. Raises rather than silently
+    substituting zero, so a typo cannot quietly change the Sharpe.
+
+    Raises ArgumentTypeError, not ValueError: argparse prints its message
+    verbatim and replaces any other exception with a generic one.
+    """
     s = str(val).strip()
+    percent = s.endswith("%")
     try:
-        if s.endswith("%"):
-            return float(s.rstrip("%")) / 100.0
-        v = float(s)
+        v = float(s[:-1] if percent else s)
     except ValueError:
-        return 0.0
-    return v / 100.0 if v > 1.0 else v
+        raise argparse.ArgumentTypeError(f"invalid risk-free rate {s!r}: use 0.03, 3 or 3%")
+    if not math.isfinite(v):
+        raise argparse.ArgumentTypeError(f"risk-free rate must be a finite number, got {s!r}")
+    return v / 100.0 if percent or abs(v) >= 1.0 else v
 
 
 def layout(term_cols: int, compare: bool) -> tuple[bool, int]:
@@ -84,15 +93,7 @@ def layout(term_cols: int, compare: bool) -> tuple[bool, int]:
 
 
 def _error(msg: str) -> None:
-    console.print(f"error: {msg}", style="red", markup=False)
-
-
-def _with_spark(meta: dict, df, width: int) -> dict:
-    col = "Adj Close" if "Adj Close" in df.columns else "Close"
-    meta = dict(meta)
-    meta["_spark_values"] = df[col].dropna().tolist()[-SPARK_POINTS:]
-    meta["_spark_width"] = width
-    return meta
+    err_console.print(f"error: {msg}", style="red", markup=False)
 
 
 def _load(ticker: str, period: str, interval: str, benchmark: str, rf: float):
@@ -108,19 +109,31 @@ def _load(ticker: str, period: str, interval: str, benchmark: str, rf: float):
 
 
 def _export(path: Path, m: metrics.Metrics, ticker: str, period: str, benchmark: str) -> int:
-    out = metrics.metrics_to_dict(m)
+    # NaN and inf are ordinary results here — VaR below 100 observations,
+    # Sharpe at zero vol — but bare NaN is not valid JSON and strict parsers
+    # reject it. Both formats emit one representation of "no value": null in
+    # JSON, an empty field in CSV.
+    out = {
+        k: (None if isinstance(v, float) and not math.isfinite(v) else v)
+        for k, v in metrics.metrics_to_dict(m).items()
+    }
     out.update({"ticker": ticker, "period": period, "benchmark": benchmark})
 
     suffix = path.suffix.lower()
-    if suffix == ".json":
-        path.write_text(json.dumps(out, default=str, indent=2))
-    elif suffix == ".csv":
-        with path.open("w", newline="") as fh:
-            writer = csv.writer(fh)
-            writer.writerow(["metric", "value"])
-            writer.writerows(out.items())
-    else:
+    if suffix not in (".json", ".csv"):
         _error(f"unknown export format '{path.suffix}': use .json or .csv")
+        return 2
+
+    try:
+        if suffix == ".json":
+            path.write_text(json.dumps(out, default=str, indent=2, allow_nan=False))
+        else:
+            with path.open("w", newline="") as fh:
+                writer = csv.writer(fh)
+                writer.writerow(["metric", "value"])
+                writer.writerows(out.items())
+    except OSError as e:
+        _error(f"could not write {path}: {e}")
         return 2
     return 0
 
@@ -209,7 +222,6 @@ def run_portfolio(args) -> int:
 
 def main(argv: Optional[list[str]] = None) -> int:
     args = build_parser().parse_args(argv)
-    args.rf = parse_rf(args.rf)
 
     if not args.tickers:
         args = interactive_menu(args)
@@ -219,8 +231,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         return run_portfolio(args)
 
     args.ticker = args.tickers[0]
-    term_cols = shutil.get_terminal_size((100, 20)).columns
-    side_by_side, spark_width = layout(term_cols, args.compare)
+    # rich does the rendering, so ask it for the width rather than keeping a
+    # second source of truth that disagrees with it when stdout is not a tty.
+    side_by_side, spark_width = layout(console.width, args.compare)
 
     try:
         asset_df, asset_meta, m = _load(args.ticker, args.period, args.interval, args.benchmark, args.rf)
@@ -228,13 +241,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         _error(str(e))
         return 2
     except Exception as e:
-        _error(f"could not fetch {args.ticker}: {e}")
+        _error(f"{args.ticker}: {e}")
         return 2
 
     panels = [
         report.build_report_panel(
-            args.ticker, _with_spark(asset_meta, asset_df, spark_width),
-            asset_df, args.period, args.benchmark, m,
+            args.ticker, asset_meta, asset_df, args.period, args.benchmark, m, spark_width
         )
     ]
 
@@ -246,8 +258,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 2
         panels.append(
             report.build_report_panel(
-                args.ticker, _with_spark(meta2, df2, spark_width),
-                df2, args.compare_period, args.benchmark, m2,
+                args.ticker, meta2, df2, args.compare_period, args.benchmark, m2, spark_width
             )
         )
 
@@ -330,17 +341,27 @@ def interactive_menu(parsed_args: argparse.Namespace) -> argparse.Namespace:
         elif action == "compare":
             state["compare"] = not state["compare"]
         elif action == "rf":
-            state["rf"] = parse_rf(Prompt.ask(prompts["rf"], default=str(state["rf"])))
+            try:
+                state["rf"] = parse_rf(Prompt.ask(prompts["rf"], default=str(state["rf"])))
+            except argparse.ArgumentTypeError as e:
+                console.print(f"[red]{e}[/red]")
+                pause()
         elif action == "run":
             if not state["ticker"]:
                 console.print("Please enter a ticker before running.")
                 pause()
                 continue
             # The ticker field doubles as a portfolio spec: "AAPL MSFT TLT".
+            # Layered over the parsed args, so a flag that exists on the
+            # parser but not in MENU still reaches main() with its default.
             settings = {k: v for k, v in state.items() if k != "ticker"}
             return argparse.Namespace(
-                tickers=state["ticker"].split(),
-                **{**settings, "export": state["export"] or None},
+                **{
+                    **vars(parsed_args),
+                    **settings,
+                    "tickers": state["ticker"].split(),
+                    "export": state["export"] or None,
+                }
             )
         else:
             current = str(state[action])

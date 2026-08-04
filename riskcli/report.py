@@ -11,7 +11,7 @@ from rich.table import Table
 from rich.text import Text
 
 from . import utils
-from .metrics import TRADING_DAYS, Metrics
+from .metrics import Metrics, price_column
 
 DASH = "—"
 
@@ -62,20 +62,24 @@ def risk_grade(m: Metrics) -> tuple[str, str]:
 
 
 def _var_label(m: Metrics) -> str:
-    horizon = "1d" if round(m.periods_per_year) == TRADING_DAYS else "1 bar"
+    """Name the VaR horizon from the bar length the annualization implies."""
+    days = 365.25 / m.periods_per_year if m.periods_per_year > 0 else 0.0
+    if days < 0.9:
+        horizon = "1 bar"  # intraday
+    elif days < 3:
+        horizon = "1d"  # 252 exchange days or 365 calendar ones
+    elif days < 15:
+        horizon = "1wk"
+    else:
+        horizon = "1mo"
     return f"VaR 95% ({horizon})"
 
 
-def _summary_grid(ticker: str, meta: dict, df, period: str, benchmark: str, m: Metrics) -> Table:
+def _summary_grid(meta: dict, df, period: str, benchmark: str, m: Metrics, spark_width: int) -> Table:
     currency = meta.get("currency") or ""
-    col = "Adj Close" if "Adj Close" in df.columns else "Close"
-    last_price = float(df[col].dropna().iloc[-1])
-
-    spark_vals = meta.get("_spark_values")
-    width = int(meta.get("_spark_width", 32))
-    if not spark_vals:
-        spark_vals = df[col].dropna().tolist()
-    spark = utils.sparkline(spark_vals[-width:])
+    prices = df[price_column(df)].dropna()
+    last_price = float(prices.iloc[-1])
+    spark = utils.sparkline(prices.tolist()[-spark_width:])
 
     # Hug the content: a padded grid keeps the panel narrow enough that two
     # reports still sit side by side in compare mode.
@@ -112,21 +116,25 @@ def _metrics_table(m: Metrics, currency: str, show_liquidity: bool = True) -> Ta
     ]
     if show_liquidity:
         # Per-instrument only; there is no meaningful portfolio-level figure.
+        # Per *bar*, so at a weekly interval this is a weekly number.
         rows.append(
-            ("Avg Value Traded", f"{utils.human_number(m.avg_daily_dollar_vol)} {currency}".strip())
+            ("Avg Value Traded / bar",
+             f"{utils.human_number(m.avg_value_traded_per_bar)} {currency}".strip())
         )
     for k, v in rows:
         t.add_row(k, v)
     return t
 
 
-def build_report_panel(ticker: str, meta: dict, df, period: str, benchmark: str, m: Metrics) -> Panel:
+def build_report_panel(
+    ticker: str, meta: dict, df, period: str, benchmark: str, m: Metrics, spark_width: int = 32
+) -> Panel:
     """Renderable report for one ticker over one period."""
     header = Text(f"{ticker} — {meta.get('name') or ticker}", style="bold")
     grade, color = risk_grade(m)
 
     body = Group(
-        Panel.fit(_summary_grid(ticker, meta, df, period, benchmark, m), title=header),
+        Panel.fit(_summary_grid(meta, df, period, benchmark, m, spark_width), title=header),
         _metrics_table(m, meta.get("currency") or ""),
         Text(f"Risk Grade: {grade}", style=f"bold {color}"),
     )
