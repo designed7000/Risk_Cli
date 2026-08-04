@@ -8,24 +8,28 @@ from riskcli import data
 class FakeTicker:
     """Stands in for yfinance.Ticker."""
 
-    def __init__(self, frame=None, fast=None, info=None, fail_times=0):
+    def __init__(self, frame=None, fast=None, info=None, fail_times=0, error=None):
         self._frame = frame
         self._fast = fast if fast is not None else {}
         self._info = info if info is not None else {}
         self._fail_times = fail_times
+        self._error = error or RuntimeError("connection reset")
         self.calls = 0
+        self.meta_calls = 0
 
     @property
     def fast_info(self):
+        self.meta_calls += 1
         return self._fast
 
     def get_info(self):
+        self.meta_calls += 1
         return self._info
 
     def history(self, period=None, interval=None, auto_adjust=None):
         self.calls += 1
         if self.calls <= self._fail_times:
-            raise RuntimeError("rate limited")
+            raise self._error
         return self._frame.copy()
 
 
@@ -120,7 +124,7 @@ def test_transient_failures_are_retried(monkeypatch):
 def test_giving_up_reraises_the_last_error(monkeypatch):
     monkeypatch.setattr(data.yf, "Ticker", lambda t: FakeTicker(_frame(), fail_times=99))
     monkeypatch.setattr(data.time, "sleep", lambda s: None)
-    with pytest.raises(RuntimeError, match="rate limited"):
+    with pytest.raises(RuntimeError, match="connection reset"):
         data.fetch_price_and_meta("AAPL")
 
 
@@ -140,6 +144,89 @@ def test_a_different_period_is_a_different_cache_key(monkeypatch):
     data.fetch_price_and_meta("AAPL", period="1y")
     data.fetch_price_and_meta("AAPL", period="3y")
     assert tk.calls == 2
+
+
+# --- rate limiting -------------------------------------------------------
+
+
+def test_a_rate_limit_is_not_retried(monkeypatch):
+    """Retrying a 429 within seconds cannot succeed and deepens the throttle."""
+    tk = FakeTicker(_frame(), fail_times=99, error=RuntimeError("Too Many Requests. Rate limited."))
+    monkeypatch.setattr(data.yf, "Ticker", lambda t: tk)
+    monkeypatch.setattr(data.time, "sleep", lambda s: pytest.fail("slept on a rate limit"))
+
+    with pytest.raises(data.RateLimited):
+        data.fetch_price_and_meta("AAPL")
+
+    assert tk.calls == 1
+
+
+def test_the_rate_limit_error_says_what_to_do(monkeypatch):
+    tk = FakeTicker(_frame(), fail_times=99, error=RuntimeError("Too Many Requests"))
+    monkeypatch.setattr(data.yf, "Ticker", lambda t: tk)
+
+    with pytest.raises(data.RateLimited, match="(?i)wait a few minutes"):
+        data.fetch_price_and_meta("AAPL")
+
+
+def test_yfinance_rate_limit_exception_is_recognised(monkeypatch):
+    from yfinance.exceptions import YFRateLimitError
+
+    tk = FakeTicker(_frame(), fail_times=99, error=YFRateLimitError())
+    monkeypatch.setattr(data.yf, "Ticker", lambda t: tk)
+    monkeypatch.setattr(data.time, "sleep", lambda s: pytest.fail("slept on a rate limit"))
+
+    with pytest.raises(data.RateLimited):
+        data.fetch_price_and_meta("AAPL")
+    assert tk.calls == 1
+
+
+def test_backoff_does_not_sleep_after_the_final_attempt(monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(data.yf, "Ticker", lambda t: FakeTicker(_frame(), fail_times=99))
+    monkeypatch.setattr(data.time, "sleep", sleeps.append)
+
+    with pytest.raises(RuntimeError):
+        data.fetch_price_and_meta("AAPL")
+
+    # Sleeping after the last failure buys nothing but delay before the error.
+    assert len(sleeps) == data.MAX_ATTEMPTS - 1
+
+
+# --- optional metadata ---------------------------------------------------
+
+
+def test_metadata_lookups_are_skipped_when_not_wanted(monkeypatch):
+    """The name/currency lookup is two extra requests; skip it when unused."""
+    tk = FakeTicker(_frame(), info={"longName": "Apple Inc."})
+    monkeypatch.setattr(data.yf, "Ticker", lambda t: tk)
+
+    df, meta = data.fetch_price_and_meta("AAPL", with_meta=False)
+
+    assert not df.empty
+    assert tk.meta_calls == 0
+    assert meta == {}
+
+
+def test_metadata_is_fetched_by_default(monkeypatch):
+    tk = FakeTicker(_frame(), info={"longName": "Apple Inc."})
+    monkeypatch.setattr(data.yf, "Ticker", lambda t: tk)
+
+    _, meta = data.fetch_price_and_meta("AAPL")
+
+    assert meta["name"] == "Apple Inc."
+    assert tk.meta_calls > 0
+
+
+def test_a_metaless_cache_hit_still_provides_metadata_when_asked(monkeypatch):
+    tk = FakeTicker(_frame(), info={"longName": "Apple Inc."})
+    monkeypatch.setattr(data.yf, "Ticker", lambda t: tk)
+
+    data.fetch_price_and_meta("AAPL", with_meta=False)
+    _, meta = data.fetch_price_and_meta("AAPL", with_meta=True)
+
+    assert meta["name"] == "Apple Inc."
+    assert tk.calls == 1  # the price history was not refetched
 
 
 def test_cached_frame_is_a_copy(monkeypatch):
