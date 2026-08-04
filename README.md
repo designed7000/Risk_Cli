@@ -7,7 +7,7 @@
 > A terminal tool that downloads adjusted market prices and prints a compact risk report for a ticker.
 
 <p align="center">
-	<img src="docs/Screenshot.png" alt="riskcli interactive" width="640"/>
+	<img src="docs/image.png" alt="riskcli portfolio report" width="640"/>
 </p>
 
 ## Summary
